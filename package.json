@@ -1,0 +1,22 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "connect": "tsx src/client.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "@types/node": "^25.5.2",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
+}

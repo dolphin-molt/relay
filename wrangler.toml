@@ -1,0 +1,19 @@
+name = "relay"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[durable_objects]
+bindings = [
+  { name = "TUNNEL", class_name = "Tunnel" },
+  { name = "REGISTRY", class_name = "Registry" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["Tunnel"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["Registry"]
+
+# AUTH_TOKEN is set via: wrangler secret put AUTH_TOKEN
