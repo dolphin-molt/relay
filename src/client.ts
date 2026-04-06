@@ -103,6 +103,12 @@ class RelayClient {
     });
   }
 
+  private accessToken: string | null = null;
+
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
   private async register(): Promise<void> {
     try {
       const resp = await fetch(`${this.options.relayUrl}/registry/register`, {
@@ -120,11 +126,37 @@ class RelayClient {
         }),
       });
       if (resp.ok) {
+        const data = await resp.json() as any;
+        this.accessToken = data.agent?.accessToken || null;
         console.log(`[relay] Registered as: ${this.options.agentId}`);
+        if (this.accessToken) {
+          console.log(`[relay] Access token: ${this.accessToken}`);
+          console.log(`[relay] External call:`);
+          console.log(`[relay]   curl ${this.options.relayUrl}/agent/${this.options.agentId}/ -H "Authorization: Bearer ${this.accessToken}"`);
+          // 写入本地文件供 okit 读取
+          this.saveAccessToken();
+        }
       }
     } catch (err: any) {
       console.error("[relay] Registration failed:", err.message);
     }
+  }
+
+  private saveAccessToken(): void {
+    if (!this.accessToken) return;
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      const dir = path.join(process.env.HOME || "~", ".okit", "relay");
+      fs.mkdirSync(dir, { recursive: true });
+      const tokensFile = path.join(dir, "tokens.json");
+      let tokens: Record<string, string> = {};
+      try {
+        tokens = JSON.parse(fs.readFileSync(tokensFile, "utf-8"));
+      } catch {}
+      tokens[this.options.agentId] = this.accessToken;
+      fs.writeFileSync(tokensFile, JSON.stringify(tokens, null, 2));
+    } catch {}
   }
 
   private async unregister(): Promise<void> {

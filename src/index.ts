@@ -36,7 +36,13 @@ export default {
       return Response.json({ status: "ok", service: "relay" }, { headers: corsHeaders() });
     }
 
-    // Everything else requires auth
+    // Agent route: /agent/:agentId/... → 用 per-agent token 认证（不需要管理 token）
+    const agentMatch = path.match(/^\/agent\/([^/]+)(\/.*)?$/);
+    if (agentMatch) {
+      return handleAgentRoute(request, env, agentMatch[1], agentMatch[2] || "/");
+    }
+
+    // Everything else requires admin auth
     if (!checkAuth(request, env)) {
       return Response.json(
         { error: "Unauthorized", hint: "Set Authorization: Bearer <token>" },
@@ -47,12 +53,6 @@ export default {
     // Registry routes
     if (path.startsWith("/registry/")) {
       return forwardToRegistry(request, env, path);
-    }
-
-    // Agent route: /agent/:agentId/... → resolve to tunnel, then forward
-    const agentMatch = path.match(/^\/agent\/([^/]+)(\/.*)?$/);
-    if (agentMatch) {
-      return handleAgentRoute(request, env, agentMatch[1], agentMatch[2] || "/");
     }
 
     // Create tunnel
@@ -104,21 +104,39 @@ async function handleAgentRoute(
   agentId: string,
   subPath: string
 ): Promise<Response> {
-  // Resolve agentId to tunnelId via registry
-  const stub = getRegistryStub(env);
-  const resolveUrl = new URL(request.url);
-  resolveUrl.pathname = `/resolve/${agentId}`;
-  const resolveResp = await stub.fetch(new Request(resolveUrl.toString()));
-
-  if (!resolveResp.ok) {
+  // 提取 token（Header 或 query param）
+  const token = extractToken(request);
+  if (!token) {
     return Response.json(
-      { error: "Agent not found", agentId, hint: "Agent may be offline" },
-      { status: 404, headers: corsHeaders() }
+      { error: "Unauthorized", hint: "Set Authorization: Bearer <agent-access-token>" },
+      { status: 401, headers: corsHeaders() }
     );
   }
 
-  const { tunnelId } = await resolveResp.json() as { tunnelId: string };
+  // 用 per-agent token 验证并解析 tunnelId
+  const stub = getRegistryStub(env);
+  const verifyUrl = new URL(request.url);
+  verifyUrl.pathname = `/verify/${agentId}`;
+  verifyUrl.searchParams.set("token", token);
+  const verifyResp = await stub.fetch(new Request(verifyUrl.toString()));
+
+  if (!verifyResp.ok) {
+    const err = await verifyResp.json() as any;
+    return Response.json(
+      { error: err.error || "Access denied", agentId },
+      { status: verifyResp.status, headers: corsHeaders() }
+    );
+  }
+
+  const { tunnelId } = await verifyResp.json() as { tunnelId: string };
   return forwardToTunnel(request, env, tunnelId, subPath);
+}
+
+function extractToken(request: Request): string | null {
+  const auth = request.headers.get("Authorization");
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  const url = new URL(request.url);
+  return url.searchParams.get("token");
 }
 
 async function forwardToTunnel(
