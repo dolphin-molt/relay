@@ -23,12 +23,16 @@ function generateToken(): string {
 export class Registry implements DurableObject {
   private state: DurableObjectState;
   private agents: Map<string, AgentInfo> = new Map();
+  // token 持久化：agentId → accessToken，不随断线删除
+  private tokens: Map<string, string> = new Map();
 
   constructor(state: DurableObjectState) {
     this.state = state;
     state.blockConcurrencyWhile(async () => {
       const stored = await state.storage.get<Map<string, AgentInfo>>("agents");
       if (stored) this.agents = stored;
+      const storedTokens = await state.storage.get<Map<string, string>>("tokens");
+      if (storedTokens) this.tokens = storedTokens;
       // 启动定时清理
       const alarm = await state.storage.getAlarm();
       if (!alarm) {
@@ -68,12 +72,17 @@ export class Registry implements DurableObject {
       if (!body.agentId || !body.tunnelId) {
         return Response.json({ error: "agentId and tunnelId required" }, { status: 400 });
       }
-      // 如果已存在同名 agent，保留原 token（重连场景）
-      const existing = this.agents.get(body.agentId);
+      // 从持久化 token 表取，同一 agentId 永远同一 token
+      let token = this.tokens.get(body.agentId);
+      if (!token) {
+        token = generateToken();
+        this.tokens.set(body.agentId, token);
+        await this.state.storage.put("tokens", this.tokens);
+      }
       const info: AgentInfo = {
         agentId: body.agentId,
         tunnelId: body.tunnelId,
-        accessToken: existing?.accessToken || generateToken(),
+        accessToken: token,
         connectedAt: body.connectedAt || new Date().toISOString(),
         lastSeen: new Date().toISOString(),
         metadata: body.metadata as Record<string, string> | undefined,
@@ -126,19 +135,45 @@ export class Registry implements DurableObject {
     if (path.startsWith("/verify/")) {
       const agentId = path.slice("/verify/".length);
       const token = url.searchParams.get("token") || "";
+      // 先验 token（从持久化表查，跟在线状态无关）
+      const validToken = this.tokens.get(agentId);
+      if (!validToken) {
+        return Response.json({ error: "Agent not registered", agentId }, { status: 404 });
+      }
+      if (validToken !== token) {
+        return Response.json({ error: "Invalid access token" }, { status: 403 });
+      }
+      // token 正确，再查在线状态
       const agent = this.agents.get(agentId);
       if (!agent) {
-        return Response.json({ error: "Agent not found", agentId }, { status: 404 });
+        return Response.json({ error: "Agent offline", agentId }, { status: 404 });
       }
       if (Date.now() - new Date(agent.lastSeen).getTime() > STALE_THRESHOLD) {
         this.agents.delete(agentId);
         await this.state.storage.put("agents", this.agents);
         return Response.json({ error: "Agent offline", agentId }, { status: 404 });
       }
-      if (agent.accessToken !== token) {
-        return Response.json({ error: "Invalid access token" }, { status: 403 });
-      }
       return Response.json({ ok: true, agentId, tunnelId: agent.tunnelId });
+    }
+
+    // Rotate token — 强制生成新 token
+    if (path.startsWith("/rotate/") && request.method === "POST") {
+      const agentId = path.slice("/rotate/".length);
+      const oldToken = this.tokens.get(agentId);
+      if (!oldToken) {
+        return Response.json({ error: "Agent not registered", agentId }, { status: 404 });
+      }
+      const newToken = generateToken();
+      this.tokens.set(agentId, newToken);
+      await this.state.storage.put("tokens", this.tokens);
+      // 如果 agent 在线，更新其记录
+      const agent = this.agents.get(agentId);
+      if (agent) {
+        agent.accessToken = newToken;
+        this.agents.set(agentId, agent);
+        await this.state.storage.put("agents", this.agents);
+      }
+      return Response.json({ ok: true, agentId, accessToken: newToken });
     }
 
     // Resolve agent to tunnel（管理接口，需要管理 token）

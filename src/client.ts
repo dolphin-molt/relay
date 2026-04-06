@@ -125,17 +125,35 @@ class RelayClient {
           },
         }),
       });
-      if (resp.ok) {
-        const data = await resp.json() as any;
-        this.accessToken = data.agent?.accessToken || null;
-        console.log(`[relay] Registered as: ${this.options.agentId}`);
-        if (this.accessToken) {
-          console.log(`[relay] Access token: ${this.accessToken}`);
-          console.log(`[relay] External call:`);
-          console.log(`[relay]   curl ${this.options.relayUrl}/agent/${this.options.agentId}/ -H "Authorization: Bearer ${this.accessToken}"`);
-          // 写入本地文件供 okit 读取
-          this.saveAccessToken();
+
+      const data = await resp.json() as any;
+
+      if (!resp.ok) {
+        console.error(`[relay] ✗ Registration failed (${resp.status})`);
+        if (data.error === "tunnel_not_connected") {
+          console.error(`[relay]   Tunnel "${this.options.tunnelId}" WebSocket not connected`);
+          console.error(`[relay]   Hint: WebSocket may have dropped before registration completed`);
+        } else if (data.error === "tunnel_probe_failed") {
+          console.error(`[relay]   Tunnel connected but end-to-end probe failed`);
+          console.error(`[relay]   Hint: Check if local target ${this.options.targetUrl} is running`);
+        } else {
+          console.error(`[relay]   Error: ${data.error || "unknown"}`);
+          if (data.hint) console.error(`[relay]   Hint: ${data.hint}`);
         }
+        this.accessToken = null;
+        return;
+      }
+
+      this.accessToken = data.agent?.accessToken || null;
+      console.log(`[relay] ✓ Registered as: ${this.options.agentId}`);
+      if (data.verified) {
+        console.log(`[relay] ✓ Connection verified (probe: ${data.probeStatus})`);
+      }
+      if (this.accessToken) {
+        console.log(`[relay] Access token: ${this.accessToken}`);
+        console.log(`[relay] External call:`);
+        console.log(`[relay]   curl ${this.options.relayUrl}/agent/${this.options.agentId}/ -H "Authorization: Bearer ${this.accessToken}"`);
+        this.saveAccessToken();
       }
     } catch (err: any) {
       console.error("[relay] Registration failed:", err.message);
