@@ -50,9 +50,9 @@ export default {
       );
     }
 
-    // Registry routes — 注册时需要先验证 tunnel 连通
+    // Registry routes
     if (path === "/registry/register" && request.method === "POST") {
-      return handleRegisterWithVerify(request, env);
+      return forwardToRegistry(request, env, "/register");
     }
     if (path.startsWith("/registry/")) {
       return forwardToRegistry(request, env, path);
@@ -169,29 +169,7 @@ async function handleRegisterWithVerify(request: Request, env: Env): Promise<Res
     }, { status: 503, headers: corsHeaders() });
   }
 
-  // 2. 通过 tunnel 发一个探测请求，验证端到端连通
-  const probeUrl = new URL(request.url);
-  probeUrl.pathname = "/__okit_probe__";
-  const probeResp = await tunnelStub.fetch(new Request(probeUrl.toString(), {
-    method: "GET",
-    headers: { "X-Okit-Probe": "1" },
-  }));
-
-  // 探测不要求目标返回 200（本地服务可能没有 /__okit_probe__ 路由）
-  // 只要不是 tunnel 层面的错误（如超时、无连接）就算通
-  // tunnel 无连接时返回 503，超时返回 504
-  if (probeResp.status === 503 || probeResp.status === 504) {
-    const probeBody = await probeResp.text();
-    return Response.json({
-      error: "tunnel_probe_failed",
-      message: `Tunnel connected but end-to-end probe failed (${probeResp.status})`,
-      tunnelId: body.tunnelId,
-      detail: probeBody,
-      hint: "WebSocket is up but request forwarding failed. Check if the local target is reachable.",
-    }, { status: 503, headers: corsHeaders() });
-  }
-
-  // 3. 连通验证通过，转发注册请求给 Registry DO
+  // 2. 连通验证通过（WebSocket 已连接），转发注册请求给 Registry DO
   const registryStub = getRegistryStub(env);
   const regUrl = new URL(request.url);
   regUrl.pathname = "/register";
@@ -203,9 +181,8 @@ async function handleRegisterWithVerify(request: Request, env: Env): Promise<Res
 
   const regData = await regResp.json() as any;
 
-  // 附加连通性验证结果
+  // WebSocket 已连接，标记验证通过
   regData.verified = true;
-  regData.probeStatus = probeResp.status;
 
   return Response.json(regData, { status: regResp.status, headers: corsHeaders() });
 }

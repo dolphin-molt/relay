@@ -1,6 +1,12 @@
 name = "relay"
-main = "src/index.ts"
-compatibility_date = "2024-12-01"
+main = "src/remote/index.ts"
+compatibility_date = "2025-04-01"
+workers_dev = true
+
+# Custom domain to allow cross-Worker calls (same-zone *.workers.dev is blocked)
+routes = [
+  { pattern = "relay.theopcapp.com/*", zone_name = "theopcapp.com" }
+]
 
 [durable_objects]
 bindings = [

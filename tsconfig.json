@@ -9,5 +9,6 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src/index.ts", "src/tunnel.ts"]
+  "include": ["src/remote/**/*.ts"],
+  "exclude": ["src/local/**/*.ts"]
 }

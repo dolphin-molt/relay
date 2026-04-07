@@ -1,5 +1,6 @@
 // Tunnel Durable Object
 // 管理本地服务端的 WebSocket 连接，转发外部请求
+// 使用 Hibernation API 保持长连接（DO 空闲时不被驱逐）
 
 export interface TunnelMessage {
   type: "request" | "response" | "connected" | "ping" | "pong" | "log" | "subscribe_logs" | "unsubscribe_logs";
@@ -16,8 +17,6 @@ export interface TunnelMessage {
 }
 
 export class Tunnel implements DurableObject {
-  private localSocket: WebSocket | null = null;
-  private logSubscribers: Set<WebSocket> = new Set();
   private pendingRequests: Map<string, {
     resolve: (msg: TunnelMessage) => void;
     timer: ReturnType<typeof setTimeout>;
@@ -26,6 +25,16 @@ export class Tunnel implements DurableObject {
 
   constructor(state: DurableObjectState) {
     this.state = state;
+  }
+
+  /** 通过 hibernation API 获取 local WebSocket（DO 唤醒后也有效） */
+  private getLocalSocket(): WebSocket | null {
+    const sockets = this.state.getWebSockets("local");
+    return sockets.length > 0 ? sockets[0] : null;
+  }
+
+  private getLogSubscribers(): WebSocket[] {
+    return this.state.getWebSockets("logs");
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -45,9 +54,9 @@ export class Tunnel implements DurableObject {
     // Status check
     if (path === "/status") {
       return Response.json({
-        connected: this.localSocket !== null,
+        connected: this.getLocalSocket() !== null,
         pendingRequests: this.pendingRequests.size,
-        logSubscribers: this.logSubscribers.size,
+        logSubscribers: this.getLogSubscribers().length,
       });
     }
 
@@ -64,11 +73,12 @@ export class Tunnel implements DurableObject {
     const [client, server] = Object.values(pair);
 
     // If there's already a connection, close it
-    if (this.localSocket) {
-      try { this.localSocket.close(1000, "replaced"); } catch {}
+    const existing = this.getLocalSocket();
+    if (existing) {
+      try { existing.close(1000, "replaced"); } catch {}
     }
 
-    this.localSocket = server;
+    // 使用 hibernation API — DO 休眠后 WebSocket 仍由运行时维持
     this.state.acceptWebSocket(server, ["local"]);
 
     // Send connected confirmation
@@ -88,7 +98,6 @@ export class Tunnel implements DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    this.logSubscribers.add(server);
     this.state.acceptWebSocket(server, ["logs"]);
 
     server.send(JSON.stringify({ type: "connected", message: "Subscribed to logs" }));
@@ -97,9 +106,10 @@ export class Tunnel implements DurableObject {
   }
 
   private async forwardToLocal(request: Request, path: string): Promise<Response> {
-    if (!this.localSocket) {
+    const localSocket = this.getLocalSocket();
+    if (!localSocket || localSocket.readyState !== 1) {
       return Response.json(
-        { error: "Tunnel not connected", hint: "Local server is offline" },
+        { error: "Tunnel not connected", hint: "Local server is offline", readyState: localSocket?.readyState },
         { status: 502 }
       );
     }
@@ -115,13 +125,11 @@ export class Tunnel implements DurableObject {
     // Convert headers
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => {
-      // Skip hop-by-hop headers
       if (!["host", "connection", "upgrade", "transfer-encoding"].includes(key.toLowerCase())) {
         headers[key] = value;
       }
     });
 
-    // Send request to local server
     const msg: TunnelMessage = {
       type: "request",
       id,
@@ -132,11 +140,10 @@ export class Tunnel implements DurableObject {
     };
 
     try {
-      this.localSocket.send(JSON.stringify(msg));
-    } catch {
-      this.localSocket = null;
+      localSocket.send(JSON.stringify(msg));
+    } catch (err: any) {
       return Response.json(
-        { error: "Tunnel connection lost" },
+        { error: "Tunnel connection lost", detail: err?.message },
         { status: 502 }
       );
     }
@@ -168,6 +175,7 @@ export class Tunnel implements DurableObject {
     });
   }
 
+  // Hibernation API 回调 — DO 被消息唤醒时调用
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const data = typeof message === "string" ? message : new TextDecoder().decode(message);
     let msg: TunnelMessage;
@@ -181,7 +189,6 @@ export class Tunnel implements DurableObject {
     const tags = this.state.getTags(ws);
 
     if (tags.includes("local")) {
-      // Message from local server
       switch (msg.type) {
         case "response":
           if (msg.id && this.pendingRequests.has(msg.id)) {
@@ -190,23 +197,17 @@ export class Tunnel implements DurableObject {
           break;
 
         case "pong":
-          // Keep-alive response, do nothing
           break;
 
         case "log":
-          // Broadcast log to all subscribers
           const logMsg = JSON.stringify(msg);
-          for (const sub of this.logSubscribers) {
-            try { sub.send(logMsg); } catch {
-              this.logSubscribers.delete(sub);
-            }
+          for (const sub of this.getLogSubscribers()) {
+            try { sub.send(logMsg); } catch {}
           }
           break;
       }
     } else if (tags.includes("logs")) {
-      // Message from log subscriber
       if (msg.type === "unsubscribe_logs") {
-        this.logSubscribers.delete(ws);
         ws.close(1000, "unsubscribed");
       }
     }
@@ -216,7 +217,6 @@ export class Tunnel implements DurableObject {
     const tags = this.state.getTags(ws);
 
     if (tags.includes("local")) {
-      this.localSocket = null;
       // Cancel all pending requests
       for (const [id, pending] of this.pendingRequests) {
         clearTimeout(pending.timer);
@@ -229,8 +229,6 @@ export class Tunnel implements DurableObject {
         });
       }
       this.pendingRequests.clear();
-    } else if (tags.includes("logs")) {
-      this.logSubscribers.delete(ws);
     }
   }
 
