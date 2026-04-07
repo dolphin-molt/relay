@@ -44,10 +44,18 @@ export class OpenClawAdapter implements Adapter {
     // 解析 body
     let message = "";
     let cwd = this.config.defaultCwd!;
+    let deliver = false;
+    let replyChannel: string | undefined;
+    let replyTo: string | undefined;
+    let sessionId: string | undefined;
     try {
       const body = JSON.parse(req.body);
       message = body.message || body.text || body.content || req.body;
       if (body.cwd) cwd = body.cwd;
+      if (body.deliver) deliver = true;
+      if (body.replyChannel) replyChannel = body.replyChannel;
+      if (body.replyTo) replyTo = body.replyTo;
+      if (body.sessionId) sessionId = body.sessionId;
     } catch {
       message = req.body;
     }
@@ -60,14 +68,15 @@ export class OpenClawAdapter implements Adapter {
       };
     }
 
-    // 解析 query params
+    // 解析 query params（body 中的优先）
     const url = new URL(`http://localhost${req.path}`);
-    const sessionId = url.searchParams.get("session") || undefined;
+    if (!sessionId) sessionId = url.searchParams.get("session") || undefined;
 
     console.log(`[openclaw] ${agentName || "default"} ← ${message.slice(0, 80)}${message.length > 80 ? "..." : ""}`);
+    if (deliver) console.log(`[openclaw]   deliver → ${replyChannel}:${replyTo}`);
 
     try {
-      const result = await this.runOpenClaw({ message, agentName, cwd, sessionId });
+      const result = await this.runOpenClaw({ message, agentName, cwd, sessionId, deliver, replyChannel, replyTo });
       console.log(`[openclaw] ${agentName || "default"} → ${result.slice(0, 80)}${result.length > 80 ? "..." : ""}`);
       return {
         status: 200,
@@ -89,6 +98,9 @@ export class OpenClawAdapter implements Adapter {
     agentName?: string;
     cwd: string;
     sessionId?: string;
+    deliver?: boolean;
+    replyChannel?: string;
+    replyTo?: string;
   }): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = ["agent", "--local", "-m", opts.message, "--json"];
@@ -99,11 +111,28 @@ export class OpenClawAdapter implements Adapter {
       if (opts.sessionId) {
         args.push("--session-id", opts.sessionId);
       }
+      if (opts.deliver) {
+        args.push("--deliver");
+      }
+      if (opts.replyChannel) {
+        args.push("--reply-channel", opts.replyChannel);
+      }
+      if (opts.replyTo) {
+        args.push("--reply-to", opts.replyTo);
+      }
       args.push("--timeout", String(Math.floor(this.config.timeout! / 1000)));
+
+      // 清理代理环境变量，避免干扰飞书等外部 API
+      const cleanEnv = { ...process.env };
+      delete cleanEnv.HTTPS_PROXY;
+      delete cleanEnv.HTTP_PROXY;
+      delete cleanEnv.https_proxy;
+      delete cleanEnv.http_proxy;
+      cleanEnv.NO_PROXY = "*";
 
       const child = spawn(this.config.openclawBin!, args, {
         cwd: opts.cwd,
-        env: { ...process.env },
+        env: cleanEnv,
         stdio: ["ignore", "pipe", "pipe"],
       });
 
